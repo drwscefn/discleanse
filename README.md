@@ -146,7 +146,7 @@ more `--channel` arguments.
   increasing waits up to 60 seconds; Discord's rate-limit waits may be longer.
   `--delay` sets the pause between deletions, defaulting to 1.2 seconds.
 - **Completion requires confirmation.** During deletion, three consecutive
-  valid searches from offset zero must report zero messages, eight seconds
+  valid searches from offset zero must report zero messages, three seconds
   apart. Empty pages with a positive or missing count, incomplete responses,
   and pending indexing wait and retry. Skipped results trigger another pass
   from the beginning. HTTP 408 timeouts also retry.
@@ -197,5 +197,5 @@ python -m twine check dist/*
 ```
 
 Builds produce a wheel and source archive under `dist/`. Install the wheel with
-`python -m pip install dist/discleanse-0.1.1-py3-none-any.whl`. Building does not
+`python -m pip install dist/discleanse-0.1.2-py3-none-any.whl`. Building does not
 publish anything to PyPI or GitHub.

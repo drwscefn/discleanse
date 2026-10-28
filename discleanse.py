@@ -34,7 +34,7 @@ For non-interactive runs, specify --guild ID with --channel ID or --all-channels
 Network failures retry automatically with waits capped at 60 seconds;
 Discord's rate-limit waits may be longer. Ctrl+C stops the run.
 Deletion completes only after three zero-result searches from the beginning,
-eight seconds apart. Empty or incomplete pages retry; undeletable messages
+three seconds apart. Empty or incomplete pages retry; undeletable messages
 can keep the run open until stopped. Dry runs finish after listing results.
 
 Options:
@@ -75,7 +75,7 @@ ERR_THREAD_ARCHIVED = 50083
 REQUEST_TIMEOUT = (10, 30)  # connect timeout, read inactivity timeout (seconds)
 MAX_RETRY_DELAY = 60
 ZERO_CONFIRMATIONS = 3
-SEARCH_RECHECK_DELAY = 8
+SEARCH_RECHECK_DELAY = 3
 _worker_state = threading.local()
 _output_lock = threading.Lock()
 BANNER = r"""
