@@ -36,6 +36,8 @@ Discord's rate-limit waits may be longer. Ctrl+C stops the run.
 Deletion completes only after three zero-result searches from the beginning,
 three seconds apart. Empty or incomplete pages retry; undeletable messages
 can keep the run open until stopped. Dry runs finish after listing results.
+Passes with no deletion progress back off up to 60 seconds and report skip
+reasons. Your deletable join, boost and pin notices are included in cleanup.
 
 Options:
   --guild ID               skip server picker
@@ -67,8 +69,13 @@ import requests
 from channel_picker import pick_channels, pick_guild
 
 API = "https://discord.com/api/v9"
-# Only these message types are user-deletable normal messages (default, reply).
-DELETABLE_TYPES = {0, 19}
+# Discord's documented deletable message types. Author and scope checks still
+# apply; Discord may additionally require permissions for some system messages.
+# https://docs.discord.com/developers/resources/message#message-object-message-types
+DELETABLE_TYPES = {
+    0, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20,
+    22, 23, 24, 25, 26, 27, 28, 29, 31, 32, 36, 37, 38, 39, 44, 46,
+}
 # Channel types: 10 = announcement thread, 11 = public thread, 12 = private thread.
 THREAD_TYPES = {10, 11, 12}
 ERR_THREAD_ARCHIVED = 50083
@@ -539,6 +546,22 @@ def cleanse_guild(session, args, me_id):
     channel_cache = {}   # channel_id -> channel object (or None)
     owned_threads = {}   # thread_id -> name
     thread_pass_done = False
+    skipped_ids = set()
+    skip_reasons = {}
+    last_skip_reason = None
+    deleted_at_pass_start = 0
+    stalled_delay = SEARCH_RECHECK_DELAY
+
+    def note_skip(msg, reason, count=True):
+        nonlocal skipped, last_skip_reason
+        message_id = msg["id"]
+        if count and message_id not in skipped_ids:
+            skipped_ids.add(message_id)
+            skipped += 1
+        if skip_reasons.get(message_id) != reason:
+            log(f"skip {message_id} (type {msg['type']}: {reason})", flush=True)
+            skip_reasons[message_id] = reason
+        last_skip_reason = f"message {message_id}, type {msg['type']}: {reason}"
 
     def note_channel(channel_id):
         """Remember threads that I created, for the optional thread-deletion pass."""
@@ -599,6 +622,7 @@ def cleanse_guild(session, args, me_id):
         # Each result is a context group; the matching message has "hit": true.
         hits = [m for group in groups for m in group if m.get("hit")]
         if not hits:
+            wait = SEARCH_RECHECK_DELAY
             if args.execute and args.delete_owned_threads and owned_threads and not thread_pass_done:
                 # An undeletable thread message must not prevent the explicitly
                 # requested thread-deletion pass from ever being reached.
@@ -612,6 +636,7 @@ def cleanse_guild(session, args, me_id):
                 # A preview does not remove messages, so it ends at the last page.
                 break
             if args.execute and offset == 0 and total == 0 and not groups:
+                stalled_delay = SEARCH_RECHECK_DELAY
                 zero_streak += 1
                 log(f"  Search reports zero messages ({zero_streak}/{ZERO_CONFIRMATIONS}).",
                     flush=True)
@@ -620,13 +645,23 @@ def cleanse_guild(session, args, me_id):
                     break
             else:
                 zero_streak = 0
-                log(f"  Empty search page (total_results={total}, offset={offset}); "
-                    "completion is not confirmed. Waiting and rechecking.", flush=True)
+                if args.execute and total > 0 and deleted == deleted_at_pass_start:
+                    wait = stalled_delay
+                    stalled_delay = min(stalled_delay * 2, MAX_RETRY_DELAY)
+                    reason = f" Last skip: {last_skip_reason}." if last_skip_reason else ""
+                    log(f"  No deletion progress (total_results={total}, offset={offset})."
+                        f"{reason} Completion is not confirmed; retrying in {wait}s.", flush=True)
+                else:
+                    stalled_delay = SEARCH_RECHECK_DELAY
+                    log(f"  Empty search page (total_results={total}, offset={offset}); "
+                        "completion is not confirmed. Waiting and rechecking.", flush=True)
             if args.execute:
                 # Deleted/stale results can shift offsets past messages that remain.
                 # Every completion check must cover the original full selection.
                 offset = 0
-            pause(SEARCH_RECHECK_DELAY)
+                deleted_at_pass_start = deleted
+                last_skip_reason = None
+            pause(wait)
             continue
         zero_streak = 0
 
@@ -637,13 +672,19 @@ def cleanse_guild(session, args, me_id):
             # Enforce the selection locally, even if search includes other channels.
             if selected_channels and msg["channel_id"] not in selected_channels:
                 offset += 1
-                skipped += 1
+                note_skip(msg, "outside the selected channels")
                 continue
             if args.delete_owned_threads:
                 note_channel(msg["channel_id"])
-            if msg["author"]["id"] != me_id or msg["type"] not in DELETABLE_TYPES:
+            if msg["author"]["id"] != me_id:
                 offset += 1
-                skipped += 1
+                note_skip(msg, "not authored by your account")
+                continue
+            if msg["type"] not in DELETABLE_TYPES:
+                offset += 1
+                reason = ("thread starter cannot be deleted individually" if msg["type"] == 21
+                          else "unsupported or non-deletable message type")
+                note_skip(msg, reason)
                 continue
             preview = (msg["content"] or "[attachment/embed]")[:60].replace("\n", " ")
             if not args.execute:
@@ -654,15 +695,14 @@ def cleanse_guild(session, args, me_id):
             ok, note = delete_message(session, msg["channel_id"], msg["id"])
             if ok is None:  # stale search result; step past it
                 offset += 1
-                log(f"skip {msg['id']} ({note})")
+                note_skip(msg, note, count=False)
                 continue
             if ok:
                 deleted += 1
                 log(f"deleted {msg['id']}: {preview} {note}")
             else:
                 offset += 1
-                skipped += 1
-                log(f"skip {msg['id']} ({note})")
+                note_skip(msg, note)
             pause(args.delay)
 
     verb = "deleted" if args.execute else "would delete"

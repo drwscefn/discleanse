@@ -152,7 +152,10 @@ more `--channel` arguments.
   from the beginning. HTTP 408 timeouts also retry.
 - **Remaining messages keep the run open.** If messages cannot be deleted
   because of their type or permissions, cleanup keeps rechecking rather than
-  declaring completion. Use Ctrl+C to stop. Authentication and other permanent
+  declaring completion. The log includes their type and skip reason. Repeated
+  passes with no deletion progress back off from 3 to 60 seconds; zero-result
+  confirmations retain the three-second interval. Use Ctrl+C to stop.
+  Authentication and other permanent
   request failures still report an error. Dry runs finish after listing results;
   they do not wait for messages to be deleted.
 - **Stopping is cooperative.** Ctrl+C interrupts waits; an in-flight HTTP
@@ -177,9 +180,12 @@ so prompts cannot overlap. `--dry-run` never deletes messages or threads.
 - Cleanup depends on Discord's search index and the account's access. Missing
   history, permission failures, stale search results, and search pagination
   limits can make a pass incomplete. The tool does not certify complete erasure.
-- Only normal messages and replies are targeted. Other message types are
-  skipped. Removed copies, exports, screenshots, or third-party archives are
-  outside this tool's scope.
+- Cleanup targets your own messages whose types Discord documents as deletable,
+  including normal messages, replies, and join, boost and pin notices.
+  Some types still require additional permissions. Thread-starter records
+  (type 21) cannot be individually deleted and are reported as skipped.
+  Removed copies, exports, screenshots, or third-party archives are outside
+  this tool's scope.
 - There is no persistent resume checkpoint. A later run searches again for
   messages that remain.
 - Archived threads may need to be temporarily unarchived to delete a message.
@@ -197,5 +203,5 @@ python -m twine check dist/*
 ```
 
 Builds produce a wheel and source archive under `dist/`. Install the wheel with
-`python -m pip install dist/discleanse-0.1.2-py3-none-any.whl`. Building does not
+`python -m pip install dist/discleanse-0.1.3-py3-none-any.whl`. Building does not
 publish anything to PyPI or GitHub.
