@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "discleanse"
+version = "0.1.0"
+description = "A terminal checklist for cleaning up your own Discord server messages"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["requests>=2.32,<3"]
+keywords = ["discord", "privacy", "terminal", "cleanup"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Environment :: Console :: Curses",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+]
+
+[project.optional-dependencies]
+dev = ["build>=1.2", "twine>=6"]
+
+[project.scripts]
+discleanse = "discleanse:cli"
+
+[project.urls]
+Repository = "https://github.com/drwscefn/discleanse"
+Issues = "https://github.com/drwscefn/discleanse/issues"
+
+[tool.setuptools]
+py-modules = ["discleanse", "channel_picker"]
