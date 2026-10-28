@@ -145,6 +145,16 @@ more `--channel` arguments.
   timeouts are 10 and 30 seconds. Network failures and server errors use
   increasing waits up to 60 seconds; Discord's rate-limit waits may be longer.
   `--delay` sets the pause between deletions, defaulting to 1.2 seconds.
+- **Completion requires confirmation.** During deletion, three consecutive
+  valid searches from offset zero must report zero messages, eight seconds
+  apart. Empty pages with a positive or missing count, incomplete responses,
+  and pending indexing wait and retry. Skipped results trigger another pass
+  from the beginning. HTTP 408 timeouts also retry.
+- **Remaining messages keep the run open.** If messages cannot be deleted
+  because of their type or permissions, cleanup keeps rechecking rather than
+  declaring completion. Use Ctrl+C to stop. Authentication and other permanent
+  request failures still report an error. Dry runs finish after listing results;
+  they do not wait for messages to be deleted.
 - **Stopping is cooperative.** Ctrl+C interrupts waits; an in-flight HTTP
   request may need to finish or time out before the process exits.
 
@@ -178,19 +188,14 @@ so prompts cannot overlap. `--dry-run` never deletes messages or threads.
 Run `discleanse --help` for all options. The source entry point remains
 available as `python discleanse.py`.
 
-## Development and packaging
+## Packaging
 
 ```bash
 python -m pip install -e '.[dev]'
-python -m unittest discover -v
 python -m build
 python -m twine check dist/*
 ```
 
-Tests use simulated Discord responses and terminal inputs. They cover selection
-scope, dry runs, retries, rate limits, background counts and concurrent workers;
-they do not delete live messages.
-
 Builds produce a wheel and source archive under `dist/`. Install the wheel with
-`python -m pip install dist/discleanse-0.1.0-py3-none-any.whl`. Building does not
+`python -m pip install dist/discleanse-0.1.1-py3-none-any.whl`. Building does not
 publish anything to PyPI or GitHub.

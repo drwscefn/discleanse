@@ -33,6 +33,9 @@ targeted with --channel ID. Nothing is selected initially.
 For non-interactive runs, specify --guild ID with --channel ID or --all-channels.
 Network failures retry automatically with waits capped at 60 seconds;
 Discord's rate-limit waits may be longer. Ctrl+C stops the run.
+Deletion completes only after three zero-result searches from the beginning,
+eight seconds apart. Empty or incomplete pages retry; undeletable messages
+can keep the run open until stopped. Dry runs finish after listing results.
 
 Options:
   --guild ID               skip server picker
@@ -71,6 +74,8 @@ THREAD_TYPES = {10, 11, 12}
 ERR_THREAD_ARCHIVED = 50083
 REQUEST_TIMEOUT = (10, 30)  # connect timeout, read inactivity timeout (seconds)
 MAX_RETRY_DELAY = 60
+ZERO_CONFIRMATIONS = 3
+SEARCH_RECHECK_DELAY = 8
 _worker_state = threading.local()
 _output_lock = threading.Lock()
 BANNER = r"""
@@ -348,7 +353,7 @@ def request(session, method, url, **kwargs):
             else:
                 pause(wait)
             continue
-        if resp.status_code >= 500:
+        if resp.status_code == 408 or resp.status_code >= 500:
             log(f"  HTTP {resp.status_code} during {method}; retrying in {retry_delay}s",
                   flush=True)
             pause(retry_delay)
@@ -530,9 +535,10 @@ def cleanse_guild(session, args, me_id):
     max_id = snowflake_from_date(args.before) if args.before else None
     offset = 0  # counts messages we skipped, since deleted ones drop out of results
     deleted = skipped = 0
-    empty_streak = 0
+    zero_streak = 0
     channel_cache = {}   # channel_id -> channel object (or None)
     owned_threads = {}   # thread_id -> name
+    thread_pass_done = False
 
     def note_channel(channel_id):
         """Remember threads that I created, for the optional thread-deletion pass."""
@@ -545,6 +551,12 @@ def cleanse_guild(session, args, me_id):
             owned_threads[channel_id] = ch.get("name", "?")
 
     while True:
+        if args.execute and offset > 9975:
+            log("  Search pagination limit reached with skipped results; "
+                "waiting and restarting from the beginning.", flush=True)
+            offset = 0
+            zero_streak = 0
+            pause(SEARCH_RECHECK_DELAY)
         params = {"author_id": me_id, "sort_by": "timestamp", "sort_order": "desc", "offset": offset}
         if args.channel:
             params["channel_id"] = args.channel
@@ -553,24 +565,70 @@ def cleanse_guild(session, args, me_id):
 
         resp = request(session, "GET", f"{API}/guilds/{args.guild}/messages/search", params=params)
         if resp.status_code == 202:  # search index not ready yet
-            pause(float(resp.json().get("retry_after", 5)) + 1)
+            zero_streak = 0
+            try:
+                wait = max(float(resp.json().get("retry_after", 5)), 0) + 1
+            except (ValueError, TypeError, AttributeError):
+                wait = SEARCH_RECHECK_DELAY
+            log(f"  Search index not ready; retrying in {wait:.1f}s.", flush=True)
+            pause(wait)
             continue
         if resp.status_code != 200:
             sys.exit(f"Search failed: {resp.status_code} {resp.text}")
 
-        data = resp.json()
-        # Each result is a context group; the matching message has "hit": true.
-        hits = [m for group in data.get("messages", []) for m in group if m.get("hit")]
-        if not hits:
-            # Search can lag behind deletions: only stop once it stays empty.
-            empty_streak += 1
-            if empty_streak >= 4 or data.get("total_results", 0) == 0:
-                break
-            log(f"  search returned nothing (total_results={data.get('total_results')}), "
-                  f"waiting for index... ({empty_streak}/3)")
-            pause(8)
+        try:
+            data = resp.json()
+            total = data.get("total_results")
+            groups = data.get("messages")
+            valid = (type(total) is int and total >= 0 and isinstance(groups, list)
+                     and all(isinstance(group, list)
+                             and all(isinstance(msg, dict) for msg in group)
+                             for group in groups))
+        except (ValueError, AttributeError):
+            valid = False
+        if not valid:
+            zero_streak = 0
+            log("  Search response incomplete or invalid; waiting and retrying.", flush=True)
+            pause(SEARCH_RECHECK_DELAY)
             continue
-        empty_streak = 0
+        if data.get("doing_deep_historical_index"):
+            zero_streak = 0
+            log("  Search is still indexing history; waiting and retrying.", flush=True)
+            pause(SEARCH_RECHECK_DELAY)
+            continue
+        # Each result is a context group; the matching message has "hit": true.
+        hits = [m for group in groups for m in group if m.get("hit")]
+        if not hits:
+            if args.execute and args.delete_owned_threads and owned_threads and not thread_pass_done:
+                # An undeletable thread message must not prevent the explicitly
+                # requested thread-deletion pass from ever being reached.
+                delete_owned_threads(session, args, owned_threads)
+                thread_pass_done = True
+                offset = 0
+                zero_streak = 0
+                pause(SEARCH_RECHECK_DELAY)
+                continue
+            if not args.execute and offset >= total:
+                # A preview does not remove messages, so it ends at the last page.
+                break
+            if args.execute and offset == 0 and total == 0 and not groups:
+                zero_streak += 1
+                log(f"  Search reports zero messages ({zero_streak}/{ZERO_CONFIRMATIONS}).",
+                    flush=True)
+                if zero_streak >= ZERO_CONFIRMATIONS:
+                    log("Confirmed zero searchable messages in the selected scope.", flush=True)
+                    break
+            else:
+                zero_streak = 0
+                log(f"  Empty search page (total_results={total}, offset={offset}); "
+                    "completion is not confirmed. Waiting and rechecking.", flush=True)
+            if args.execute:
+                # Deleted/stale results can shift offsets past messages that remain.
+                # Every completion check must cover the original full selection.
+                offset = 0
+            pause(SEARCH_RECHECK_DELAY)
+            continue
+        zero_streak = 0
 
         for msg in hits:
             control = getattr(_worker_state, "control", None)
@@ -610,6 +668,12 @@ def cleanse_guild(session, args, me_id):
     verb = "deleted" if args.execute else "would delete"
     log(f"\nMessages: {verb} {deleted}, skipped {skipped}.")
 
+    if args.delete_owned_threads and not thread_pass_done:
+        delete_owned_threads(session, args, owned_threads)
+
+
+def delete_owned_threads(session, args, owned_threads):
+    """Run the explicitly requested owned-thread pass, retaining confirmation."""
     # Optional pass: delete threads I created.
     if args.delete_owned_threads:
         if not owned_threads:
